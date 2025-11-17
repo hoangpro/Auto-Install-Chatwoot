@@ -1,0 +1,176 @@
+#!/bin/bash
+# ==============================================
+# Script: Auto Install Chatwoot + Nginx Proxy Manager
+# Phiên bản: 1.0
+# Tác giả: Michel Tran
+# Website: https://phonuiit.com
+# Liên hệ: support@phonuiit.com
+# Mục đích: Tự động cài Chatwoot instance riêng biệt
+#           với Rails + Sidekiq, Proxy Host + SSL trên Nginx Proxy Manager
+# Tính năng:
+#   - Tạo container Chatwoot riêng cho mỗi instance
+#   - Tạo thư mục data riêng
+#   - Tự động tạo SECRET_KEY
+#   - Chuẩn bị database và chạy Rails + Sidekiq
+#   - Cài đặt Nginx Proxy Manager nếu chưa có
+#   - Tạo Proxy Host + SSL tự động
+#   - Kiểm tra port trùng và tên container trùng
+# ==============================================
+
+set -e
+
+echo "==============================================="
+echo "INSTALL CHATWOOT INSTANCE + NGINX PROXY MANAGER"
+echo "==============================================="
+
+# 1. Cài jq nếu chưa có
+if ! command -v jq &> /dev/null
+then
+    echo "📦 Cài đặt jq..."
+    sudo apt update && sudo apt install -y jq
+fi
+
+# 2. Nhập domain
+read -p "Nhập domain (vd: chat.example.com): " DOMAIN_NAME
+if [ -z "$DOMAIN_NAME" ]; then
+    echo "❌ Chưa nhập domain. Thoát!"
+    exit 1
+fi
+
+# 3. Nhập port và check trùng
+while true; do
+    read -p "Nhập port Chatwoot forward (vd: 3000): " CHAT_PORT
+    if [ -z "$CHAT_PORT" ]; then
+        echo "❌ Chưa nhập port."
+        continue
+    fi
+    if ss -tln | grep ":$CHAT_PORT " > /dev/null; then
+        echo "❌ Port $CHAT_PORT đang dùng. Vui lòng nhập port khác."
+    else
+        break
+    fi
+done
+
+# 4. Nhập tên container và check trùng
+while true; do
+    read -p "Nhập tên container (vd: chatwoot1): " CONTAINER_NAME
+    if [ -z "$CONTAINER_NAME" ]; then
+        echo "❌ Chưa nhập tên container."
+        continue
+    fi
+    if docker ps -a --format '{{.Names}}' | grep -w "$CONTAINER_NAME" > /dev/null; then
+        echo "❌ Container $CONTAINER_NAME đã tồn tại. Nhập tên khác."
+    else
+        break
+    fi
+done
+
+# 5. Thiết lập thư mục
+DOMAIN_DIR="/home/$DOMAIN_NAME"
+CHATWOOT_DIR="$DOMAIN_DIR/$CONTAINER_NAME"
+PROXY_DIR="$DOMAIN_DIR/nginx-proxy"
+ENV_CHAT="$CHATWOOT_DIR/.env"
+
+echo "===== TẠO THƯ MỤC ====="
+mkdir -p $CHATWOOT_DIR/data/storage $CHATWOOT_DIR/data/postgres $CHATWOOT_DIR/data/redis
+mkdir -p $PROXY_DIR
+
+# 6. Kiểm tra .env
+if [ ! -f "$ENV_CHAT" ]; then
+    echo "⚠ File .env chưa tồn tại. Vui lòng upload file vào $CHATWOOT_DIR"
+    exit 1
+fi
+
+# 7. Tạo SECRET_KEY
+SECRET_KEY=$(openssl rand -hex 64)
+sed -i "s|SECRET_KEY_BASE=.*|SECRET_KEY_BASE=$SECRET_KEY|" $ENV_CHAT
+echo "✔ SECRET_KEY đã tạo: $SECRET_KEY"
+
+# 8. Chuẩn bị DB
+cd $CHATWOOT_DIR
+docker compose run --rm rails bundle exec rails db:chatwoot_prepare
+
+# 9. Chạy Rails + Sidekiq với tên container riêng
+docker compose -p $CONTAINER_NAME up -d rails sidekiq
+echo "✔ Chatwoot container $CONTAINER_NAME đang chạy"
+
+# 10. Cài Nginx Proxy Manager nếu chưa có
+if [ ! -f "$PROXY_DIR/docker-compose.yml" ]; then
+cat > $PROXY_DIR/docker-compose.yml <<EOF
+services:
+  app:
+    image: 'jc21/nginx-proxy-manager:latest'
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '81:81'
+      - '443:443'
+    volumes:
+      - ./data:/data
+      - ./letsencrypt:/etc/letsencrypt
+EOF
+fi
+
+cd $PROXY_DIR
+docker compose up -d
+
+# 11. Đợi NPM khởi động
+echo "⏳ Đợi 15s cho Nginx Proxy Manager khởi động..."
+sleep 15
+
+NPM_URL="http://localhost:81"
+NPM_EMAIL="admin@example.com"
+NPM_PASS="changeme"
+
+# 12. Lấy token API
+TOKEN=$(curl -s -X POST "$NPM_URL/api/tokens" \
+  -H "Content-Type: application/json" \
+  -d "{\"identity\":\"$NPM_EMAIL\",\"secret\":\"$NPM_PASS\"}" | jq -r '.token')
+
+if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
+    echo "❌ Lấy token NPM thất bại. Kiểm tra NPM đã chạy chưa."
+    exit 1
+fi
+
+echo "✔ Lấy token NPM thành công"
+
+# 13. Lấy IP container Rails
+RAILS_CONTAINER=$(docker ps --format '{{.Names}}' | grep $CONTAINER_NAME)
+RAILS_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $RAILS_CONTAINER)
+echo "✔ Rails container IP: $RAILS_IP"
+
+# 14. Tạo Proxy Host trong NPM
+curl -s -X POST "$NPM_URL/api/nginx/proxy-hosts" \
+-H "Authorization: Bearer $TOKEN" \
+-H "Content-Type: application/json" \
+-d "{
+  \"domain_names\": [\"$DOMAIN_NAME\"],
+  \"forward_scheme\": \"http\",
+  \"forward_host\": \"$RAILS_IP\",
+  \"forward_port\": $CHAT_PORT,
+  \"block_exploits\": true,
+  \"caching_enabled\": false,
+  \"ssl\": {
+    \"enabled\": true,
+    \"force_ssl\": true,
+    \"http2\": true,
+    \"hsts_enabled\": true,
+    \"hsts_subdomains\": true,
+    \"hsts_include_subdomains\": true,
+    \"letsencrypt_email\": \"$NPM_EMAIL\",
+    \"letsencrypt_agree\": true
+  }
+}"
+
+echo "==============================================="
+echo "HOÀN TẤT CÀI ĐẶT CHATWOOT INSTANCE RIÊNG BIỆT!"
+echo "-----------------------------------------------"
+echo "📌 Domain: $DOMAIN_NAME"
+echo "📌 Container: $CONTAINER_NAME"
+echo "📌 Port forward: $CHAT_PORT"
+echo "📌 Nginx Proxy Manager: http://IP-SERVER:81"
+echo "📌 Email NPM: $NPM_EMAIL / Password: $NPM_PASS"
+echo "📌 Tác giả: Michel Tran"
+echo "📌 Website: https://phonuiit.com"
+echo "📌 Liên hệ: support@phonuiit.com"
+echo "==============================================="
