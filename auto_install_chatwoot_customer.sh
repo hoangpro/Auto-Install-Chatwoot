@@ -28,16 +28,45 @@ if ! command -v jq &> /dev/null
 then
     echo "📦 Cài đặt jq..."
     sudo apt update && sudo apt install -y jq
+else
+    echo "✔ jq đã có sẵn, bỏ qua"
 fi
 
-# 2. Nhập domain
+# 2. Kiểm tra Docker
+if ! command -v docker &> /dev/null
+then
+    echo "🐳 Cài đặt Docker..."
+    sudo apt update
+    sudo apt install -y ca-certificates curl gnupg lsb-release
+    sudo mkdir -p /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    echo \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+      $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    sudo apt update
+    sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+else
+    echo "✔ Docker đã có sẵn, bỏ qua"
+fi
+
+# 3. Kiểm tra Docker Compose
+if ! docker compose version &> /dev/null
+then
+    echo "📦 Cài đặt Docker Compose..."
+    sudo curl -L "https://github.com/docker/compose/releases/download/v2.20.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    sudo chmod +x /usr/local/bin/docker-compose
+else
+    echo "✔ Docker Compose đã có sẵn, bỏ qua"
+fi
+
+# 4. Nhập domain
 read -p "Nhập domain (vd: chat.example.com): " DOMAIN_NAME
 if [ -z "$DOMAIN_NAME" ]; then
     echo "❌ Chưa nhập domain. Thoát!"
     exit 1
 fi
 
-# 3. Nhập port và check trùng
+# 5. Nhập port và check trùng
 while true; do
     read -p "Nhập port Chatwoot forward (vd: 3000): " CHAT_PORT
     if [ -z "$CHAT_PORT" ]; then
@@ -51,7 +80,7 @@ while true; do
     fi
 done
 
-# 4. Nhập tên container và check trùng
+# 6. Nhập tên container và check trùng
 while true; do
     read -p "Nhập tên container (vd: chatwoot1): " CONTAINER_NAME
     if [ -z "$CONTAINER_NAME" ]; then
@@ -65,7 +94,7 @@ while true; do
     fi
 done
 
-# 5. Thiết lập thư mục
+# 7. Thiết lập thư mục
 DOMAIN_DIR="/home/$DOMAIN_NAME"
 CHATWOOT_DIR="$DOMAIN_DIR/$CONTAINER_NAME"
 PROXY_DIR="$DOMAIN_DIR/nginx-proxy"
@@ -75,26 +104,26 @@ echo "===== TẠO THƯ MỤC ====="
 mkdir -p $CHATWOOT_DIR/data/storage $CHATWOOT_DIR/data/postgres $CHATWOOT_DIR/data/redis
 mkdir -p $PROXY_DIR
 
-# 6. Kiểm tra .env
+# 8. Kiểm tra .env
 if [ ! -f "$ENV_CHAT" ]; then
     echo "⚠ File .env chưa tồn tại. Vui lòng upload file vào $CHATWOOT_DIR"
     exit 1
 fi
 
-# 7. Tạo SECRET_KEY
+# 9. Tạo SECRET_KEY
 SECRET_KEY=$(openssl rand -hex 64)
 sed -i "s|SECRET_KEY_BASE=.*|SECRET_KEY_BASE=$SECRET_KEY|" $ENV_CHAT
 echo "✔ SECRET_KEY đã tạo: $SECRET_KEY"
 
-# 8. Chuẩn bị DB
+# 10. Chuẩn bị DB
 cd $CHATWOOT_DIR
 docker compose run --rm rails bundle exec rails db:chatwoot_prepare
 
-# 9. Chạy Rails + Sidekiq với tên container riêng
+# 11. Chạy Rails + Sidekiq với tên container riêng
 docker compose -p $CONTAINER_NAME up -d rails sidekiq
 echo "✔ Chatwoot container $CONTAINER_NAME đang chạy"
 
-# 10. Cài Nginx Proxy Manager nếu chưa có
+# 12. Cài Nginx Proxy Manager nếu chưa có
 if [ ! -f "$PROXY_DIR/docker-compose.yml" ]; then
 cat > $PROXY_DIR/docker-compose.yml <<EOF
 services:
@@ -114,7 +143,7 @@ fi
 cd $PROXY_DIR
 docker compose up -d
 
-# 11. Đợi NPM khởi động
+# 13. Đợi NPM khởi động
 echo "⏳ Đợi 15s cho Nginx Proxy Manager khởi động..."
 sleep 15
 
@@ -122,7 +151,7 @@ NPM_URL="http://localhost:81"
 NPM_EMAIL="admin@example.com"
 NPM_PASS="changeme"
 
-# 12. Lấy token API
+# 14. Lấy token API
 TOKEN=$(curl -s -X POST "$NPM_URL/api/tokens" \
   -H "Content-Type: application/json" \
   -d "{\"identity\":\"$NPM_EMAIL\",\"secret\":\"$NPM_PASS\"}" | jq -r '.token')
@@ -134,12 +163,12 @@ fi
 
 echo "✔ Lấy token NPM thành công"
 
-# 13. Lấy IP container Rails
+# 15. Lấy IP container Rails
 RAILS_CONTAINER=$(docker ps --format '{{.Names}}' | grep $CONTAINER_NAME)
 RAILS_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $RAILS_CONTAINER)
 echo "✔ Rails container IP: $RAILS_IP"
 
-# 14. Tạo Proxy Host trong NPM
+# 16. Tạo Proxy Host trong NPM
 curl -s -X POST "$NPM_URL/api/nginx/proxy-hosts" \
 -H "Authorization: Bearer $TOKEN" \
 -H "Content-Type: application/json" \
