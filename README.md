@@ -8,9 +8,9 @@ Script này giúp bạn cài đặt nhanh **Chatwoot**, **N8n** và **Nginx Prox
 * N8n: nền tảng workflow automation.
 * Nginx Proxy Manager: quản lý domain, reverse proxy & SSL tự động.
 
-**Phiên bản script:** 2.0
-**Tác giả:** Michel Tran
-**Website:** [https://phonuiit.com](https://phonuiit.com)
+* Phiên bản script:** 2.0
+* Tác giả:** Michel Tran
+* Website:** [https://phonuiit.com](https://phonuiit.com)
 
 ---
 
